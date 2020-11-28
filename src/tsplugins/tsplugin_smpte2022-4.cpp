@@ -74,6 +74,7 @@ namespace ts {
 	    uint8_t _byte_buffer [IP_MAX_PACKET_SIZE*2];
 	    uint8_t _packet_per_Datagram_max;
 	    uint8_t _running_ts_counter;
+	    Microseconds _current_timestamp;
 	};
 }
 
@@ -82,7 +83,7 @@ TSPLUGIN_DECLARE_INPUT(u"smpte-2022-4", ts::SMPTE_2022_4)
 ts::SMPTE_2022_4::SMPTE_2022_4(TSP* ptsp):
 	AbstractDatagramInputPlugin(ptsp, IP_MAX_PACKET_SIZE, u"Receive TS packets from UDP/IP, multicast or unicast"
 			, u"[options] [address:]port", u"kernel", u"A kernel-provided time-stamp for the packet, when available (Linux only)")
-	, _sock(*ptsp), _packet_per_Datagram_max(0), _running_ts_counter(0) {
+	, _sock(*ptsp), _packet_per_Datagram_max(0), _running_ts_counter(0), _current_timestamp(0) {
 
 	// Add UDP receiver common options.
 	_sock.defineArgs(*this);
@@ -156,18 +157,18 @@ bool ts::SMPTE_2022_4::receiveDatagram(void* buffer, size_t buffer_size, size_t&
 
 	if (valid){
 
-		uint8_t* bytes = static_cast<u_char*>(buffer);
-		size_t rtp_header_size = _rtpHeaderSize(bytes, buffer_size);
+		uint8_t* ptr_cur_pos = static_cast<u_char*>(buffer);
+		size_t rtp_header_size = _rtpHeaderSize(ptr_cur_pos, buffer_size);
 
 		if (rtp_header_size==0) // no RPT, let processing without modification
 			return valid;
 
 		if (rtp_header_size < buffer_size){
-			const uint8_t* end = bytes + buffer_size;
+			const uint8_t* end = ptr_cur_pos + buffer_size;
 
-			bytes+=rtp_header_size;
+			ptr_cur_pos+=rtp_header_size;
 
-			uint8_t *packet = bytes;
+			uint8_t *packet = ptr_cur_pos;
 			std::list<uint8_t*> packets;
 			while (packet < end && packet[0] == SYNC_BYTE){
 				packets.push_back(packet);
@@ -178,7 +179,7 @@ bool ts::SMPTE_2022_4::receiveDatagram(void* buffer, size_t buffer_size, size_t&
 				tsp->log(Severity::Warning, u"No TS packet found in datagram");
 			else{
 				if (_packet_per_Datagram_max==0){
-					_packet_per_Datagram_max = packet - bytes;
+					_packet_per_Datagram_max = packet - ptr_cur_pos;
 				}else{
 					uint nbpackets = packets.size();
 					if (nbpackets != _packet_per_Datagram_max){
@@ -196,13 +197,24 @@ bool ts::SMPTE_2022_4::receiveDatagram(void* buffer, size_t buffer_size, size_t&
 					packet += 1;
 
 					//each time data is 4 bytes
-					if(packet + time_data_count*4 <= end){
+					if(packet + time_data_count*sizeof(uint32_t) <= end){
 						if (time_data_desc == 0x01){ //running TS packet counter
 							ret_size = _restoreAllPackets(reinterpret_cast<uint8_t*>(buffer), buffer_size, packets,
 									reinterpret_cast<uint32_t*>(packet), time_data_count);
 
 						} else if (time_data_desc == 0x10){ //27 Mhz clock
 							tsp->log(Severity::Fatal, u"SMPTE 2022-4 with 27 Mhz clock time field is not implemented");
+							size_t index = 0;
+							uint32_t _27mhz_tmstamp = reinterpret_cast<uint32_t*>(packet)[index];
+							if( _current_timestamp == 0 ){
+								_current_timestamp = _27mhz_tmstamp;
+							}
+
+							// 27 is nb clocks ticks for 1 microsecond
+							if (_27mhz_tmstamp - _current_timestamp < 27){
+								//copy to output
+							}
+
 						}
 					}
 					else{
